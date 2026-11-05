@@ -1,3 +1,3 @@
 #!/bin/bash
-cd "$(dirname "$0")"
+cd "/Users/tejasdumpeta/Resume Generator"
 ./start.sh
