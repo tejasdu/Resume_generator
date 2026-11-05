@@ -1,3 +1,5 @@
+<img width="796" height="564" alt="Screenshot 2026-11-05 at 6 16 48 PM" src="https://github.com/user-attachments/assets/a788796e-52e6-449d-92b2-b56bdf941459" />
+
 # Resume Tailor
 
 A local automation tool that tailors a master resume for specific job descriptions and exports an ATS-optimized, single-page PDF in seconds.
