@@ -1,0 +1,21 @@
+# Environment and secrets
+.env
+*.env
+venv/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Resumes and PDFs (personal data)
+master_resume*
+*.docx
+*.pdf
+tailored_resumes/
+
+# Temp test files
+test_output.pdf
+
+# OS artifacts
+.DS_Store
