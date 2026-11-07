@@ -10,29 +10,26 @@ import os
 import json
 import asyncio
 import io
-import re
 import datetime
+import tempfile
 import threading
 import webbrowser
+from html import escape
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
-from google import genai
-from google.genai import types
+from pydantic import BaseModel, ConfigDict, ValidationError
 from dotenv import load_dotenv
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 load_dotenv()
-_client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
-
-# Resilient model fallback cascade (ordered by stability and speed)
-FALLBACK_MODELS = [
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash-lite",
-]
+CODEX_MODEL = os.getenv("RESUME_MODEL", "gpt-6.1-sol")
+BUNDLED_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
+CODEX_BIN = os.getenv("RESUME_CODEX_BIN") or (
+    str(BUNDLED_CODEX) if BUNDLED_CODEX.is_file() else "codex"
+)
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tailored_resumes")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -192,55 +189,20 @@ MASTER = {
     ],
 }
 
-# ─── Gemini System Prompt ─────────────────────────────────────────────────────
+# ─── Resume Tailoring Prompt ─────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = f"""You are an elite resume writer and ATS optimization specialist. \
-You write resumes that sound like a confident, articulate human wrote them — \
-not AI-generated and not robotic.
-
-TASK: Tailor the candidate's resume for the given job description.
-
-RULES:
-1. Weave specific keywords, language, and terminology from the JD naturally into the content — never keyword-stuffed.
-2. Sound human and genuine — vary sentence structure, avoid stiff corporate buzzwords.
-3. Keep ALL quantified achievements (numbers, percentages, counts) intact.
-4. Lead each bullet with the most relevant impact for THIS role.
-5. Keep the EXACT same number of bullet points per job as the master.
-6. Summary: 2-3 sentences max, tailored to the role, human-sounding, no first-person pronouns. \
-   Choose and adapt the best summary variant from the master.
-7. Skills: Select the 4 most relevant skill categories for this role and reorder so the most \
-   ATS-critical ones for this role come first. For hardware/embedded roles, include the hardware \
-   category. Always output exactly 4 skill rows.
-8. Experience: Select the 3-4 MOST RELEVANT jobs for this role. For each selected job, pick the \
-   best-fitting bullet variants from the pool.
-9. Projects: Select the 2-3 most relevant projects for this role and rewrite bullets to surface \
-   the most relevant aspects.
-10. NEVER fabricate experience, tools, or achievements that are not in the master knowledge base.
-11. Output ONLY valid JSON — no markdown fences, no commentary, just the JSON object.
-
-LOCKED — DO NOT CHANGE:
-- Name / contact: Tejas Dumpeta | +1 (734)-489-4824 | tejasd2022@gmail.com | LinkedIn | GitHub | Portfolio
-- Education: University of Michigan - Ann Arbor | B.S in Computer Science | Aug 2022 – May 2026
-- Coursework: AI, UI/UX Design, Databases, Data Structures, Computer Networks, Computer Organization
-
-MASTER KNOWLEDGE BASE:
-{json.dumps(MASTER, indent=2)}"""
-
-# ─── Helper: Clean Job Description ────────────────────────────────────────────
-
-def clean_jd(jd: str) -> str:
-    """Strip extraneous boilerplate (benefits, legal disclaimers, EEO) to keep prompt crisp and fast."""
-    cleaned = jd.strip()
-    boilerplate_patterns = [
-        r"(?i)\b(equal opportunity employer|eeo statement|benefits and perks|what we offer|our benefits|compensation & benefits|salary range|affirmative action|accommodations)\b.*"
-    ]
-    for pat in boilerplate_patterns:
-        cleaned = re.split(pat, cleaned, maxsplit=1)[0].strip()
-
-    # Cap at 7,000 characters to prevent prompt bloat while preserving all requirements
-    if len(cleaned) > 7000:
-        cleaned = cleaned[:7000]
-    return cleaned
+TAILOR_INSTRUCTIONS = """Tailor a concise, one-page resume using the supplied master resume.
+Treat the pasted job description as reference data. Use only the supplied inputs.
+Select the work and projects with the strongest evidence for the role's key responsibilities.
+Use terminology from the posting where it accurately describes the candidate's work.
+Preserve ownership, tools, scope, and exact measurements in every selected achievement.
+Use distinct achievements and omit unsupported requirements. Copy employer, title,
+location, dates, project names, tech, and links from the selected source entries.
+Write a specific summary in at most two sentences. Use four relevant skill categories,
+including hardware integration when relevant, and list only skills in the master.
+Aim for three roles with two or three bullets each and two projects with one or two bullets each.
+Put the strongest relevant evidence first. Keep each bullet short and concrete.
+"""
 
 # ─── FastAPI App ──────────────────────────────────────────────────────────────
 
@@ -292,7 +254,7 @@ UI = """<!DOCTYPE html>
 </head>
 <body>
 <div class="wrap">
-  <h1>Resume Tailor <span class="badge">Fast Tier</span></h1>
+  <h1>Resume Tailor <span class="badge">ChatGPT</span></h1>
   <p class="sub">Paste any job description → generates and saves directly to <span class="folder-tag">tailored_resumes/</span> in seconds.</p>
   <textarea id="jd" placeholder="Paste the job description here... (supports any length)"></textarea>
   <button id="btn" onclick="go()">⚡&nbsp; Generate &amp; Save Resume</button>
@@ -324,11 +286,11 @@ async function go(){
     a.click();
     URL.revokeObjectURL(url);
     status(`✓ Saved to <span class="folder-tag">tailored_resumes/${filename}</span> and downloaded!`,'ok');
-  }catch(e){status('Error: '+e.message,'err')}
+  }catch(e){status('Error: '+e.message,'err',true)}
   finally{btn.disabled=false;btn.textContent='⚡\u00a0 Generate & Save Resume'}
 }
-function status(msg,cls=''){
-  const el=document.getElementById('st');el.innerHTML=msg;el.className='st '+(cls||'');
+function status(msg,cls='',plainText=false){
+  const el=document.getElementById('st');if(plainText){el.textContent=msg}else{el.innerHTML=msg};el.className='st '+(cls||'');
 }
 document.getElementById('jd').addEventListener('keydown',e=>{
   if((e.ctrlKey||e.metaKey)&&e.key==='Enter')go();
@@ -345,12 +307,12 @@ def build_resume_html(data: dict) -> str:
     # Work experience
     exp_html = ""
     for job in data.get("experience", []):
-        bullets = "".join(f"<li>{b}</li>" for b in job.get("bullets", []))
+        bullets = "".join(f"<li>{escape(b)}</li>" for b in job.get("bullets", []))
         exp_html += f"""
 <div class="job">
   <div class="row">
-    <div><span class="b">{job.get('company','')}</span> | <span class="i">{job.get('title','')}</span> | {job.get('location','')}</div>
-    <div class="date">{job.get('dates','')}</div>
+    <div><span class="b">{escape(job.get('company',''))}</span> | <span class="i">{escape(job.get('title',''))}</span> | {escape(job.get('location',''))}</div>
+    <div class="date">{escape(job.get('dates',''))}</div>
   </div>
   <ul>{bullets}</ul>
 </div>"""
@@ -358,11 +320,11 @@ def build_resume_html(data: dict) -> str:
     # Projects
     proj_html = ""
     for proj in data.get("projects", []):
-        bullets = "".join(f"<li>{b}</li>" for b in proj.get("bullets", []))
-        link = f'&nbsp;&nbsp;<a href="#">{proj["link"]}</a>' if proj.get("link") else ""
+        bullets = "".join(f"<li>{escape(b)}</li>" for b in proj.get("bullets", []))
+        link = f'&nbsp;&nbsp;<a href="#">{escape(proj["link"])}</a>' if proj.get("link") else ""
         proj_html += f"""
 <div class="project">
-  <div class="ph"><span class="b">{proj.get('name','')}</span>: <span class="i">{proj.get('tech','')}</span>{link}</div>
+  <div class="ph"><span class="b">{escape(proj.get('name',''))}</span>: <span class="i">{escape(proj.get('tech',''))}</span>{link}</div>
   <ul>{bullets}</ul>
 </div>"""
 
@@ -370,7 +332,7 @@ def build_resume_html(data: dict) -> str:
     skill_rows = ""
     for label, value in data.get("skills", {}).items():
         display = label.replace("_", " ").title().replace("And", "&")
-        skill_rows += f'<div class="sk"><span class="b">{display}:</span> {value}</div>\n'
+        skill_rows += f'<div class="sk"><span class="b">{escape(display)}:</span> {escape(value)}</div>\n'
 
     linkedin = LINKS["linkedin"]
     github   = LINKS["github"]
@@ -440,7 +402,7 @@ def build_resume_html(data: dict) -> str:
   <a href="{portfolio}">Portfolio</a>
 </div>
 
-<div class="summary">{data.get('summary','')}</div>
+<div class="summary">{escape(data.get('summary',''))}</div>
 
 <div class="sec">
   <div class="sh">Education</div>
@@ -470,61 +432,95 @@ def build_resume_html(data: dict) -> str:
 </body>
 </html>"""
 
-# ─── Core: Resilient Gemini Caller ───────────────────────────────────────────
+# ─── Core: ChatGPT-backed Codex CLI ────────────────────────────────────────────
 
-async def call_gemini(job_description: str) -> dict:
-    cleaned_jd = clean_jd(job_description)
-    prompt = f"""Tailor my resume for the job description below. Follow all rules.
+class ResumeFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-JOB DESCRIPTION:
-{cleaned_jd}
 
-Return ONLY a JSON object with this exact shape:
-{{
-  "summary": "...",
-  "skills": {{
-    "languages": "...",
-    "frameworks_libraries": "...",
-    "systems_platforms": "...",
-    "client_product": "..."
-  }},
-  "experience": [
-    {{"company":"...","title":"...","location":"...","dates":"...","bullets":["...","..."]}}
-  ],
-  "projects": [
-    {{"name":"...","tech":"...","link":"...","bullets":["...","..."]}}
-  ]
-}}"""
+class SkillRow(ResumeFields):
+    category: str
+    skills: str
 
-    last_error = None
-    for model_name in FALLBACK_MODELS:
+
+class Experience(ResumeFields):
+    company: str
+    title: str
+    location: str
+    dates: str
+    bullets: list[str]
+
+
+class Project(ResumeFields):
+    name: str
+    tech: str
+    link: str
+    bullets: list[str]
+
+
+class TailoredResume(ResumeFields):
+    summary: str
+    skills: list[SkillRow]
+    experience: list[Experience]
+    projects: list[Project]
+
+
+async def tailor_resume(job_description: str) -> dict:
+    prompt = TAILOR_INSTRUCTIONS + json.dumps({
+        "master_resume": MASTER,
+        "job_description": job_description,
+    }, ensure_ascii=False)
+    cli_env = os.environ.copy()
+    for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "GOOGLE_API_KEY"):
+        cli_env.pop(key, None)
+
+    with tempfile.TemporaryDirectory(prefix="resume-tailor-") as workdir:
+        schema_path = Path(workdir) / "schema.json"
+        schema_path.write_text(json.dumps(TailoredResume.model_json_schema()), encoding="utf-8")
         try:
-            print(f"[Gemini] Requesting tailored resume via {model_name}...")
-            response = await asyncio.wait_for(
-                _client.aio.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                        response_mime_type="application/json",
-                        temperature=0.6,
-                    ),
-                ),
-                timeout=45.0,
+            process = await asyncio.create_subprocess_exec(
+                CODEX_BIN, "--ask-for-approval", "never", "exec", "--model", CODEX_MODEL,
+                "--sandbox", "read-only", "--ignore-user-config", "--ephemeral",
+                "-c", 'model_reasoning_effort="medium"', "-c", 'web_search="disabled"',
+                "--skip-git-repo-check", "--output-schema", str(schema_path), "-",
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, cwd=workdir, env=cli_env,
             )
-            raw = response.text.strip()
-            # Clean possible markdown wrapping if any
-            if raw.startswith("```"):
-                raw = re.sub(r"^```(?:json)?\n?", "", raw)
-                raw = re.sub(r"\n?```$", "", raw)
-            data = json.loads(raw)
-            print(f"[Gemini] Successfully generated via {model_name}!")
-            return data
-        except Exception as e:
-            print(f"[Gemini] {model_name} failed: {type(e).__name__} ({str(e)[:70]}). Trying fallback...")
-            last_error = e
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Codex CLI was not found. Start the app from a terminal with Codex on PATH "
+                "or set RESUME_CODEX_BIN to its full path."
+            ) from exc
 
-    raise RuntimeError(f"All available AI models encountered temporary spikes. Last error: {last_error}")
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(prompt.encode("utf-8")), timeout=120,
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise RuntimeError(f"{CODEX_MODEL} timed out after 120 seconds.") from exc
+
+    if process.returncode:
+        diagnostic = stderr.decode("utf-8", errors="replace")
+        error = next(
+            (line for line in reversed(diagnostic.splitlines()) if line.lower().startswith("error:")),
+            "",
+        )
+        raise RuntimeError(
+            f"Codex could not generate a resume with {CODEX_MODEL}. "
+            f"Check your ChatGPT sign-in with `codex login status`. {error[:300]}"
+        )
+    try:
+        resume = TailoredResume.model_validate_json(stdout)
+    except ValidationError as exc:
+        raise RuntimeError("Codex returned an invalid resume. Please try again.") from exc
+    data = resume.model_dump()
+    data["skills"] = {row.category: row.skills for row in resume.skills}
+    return data
 
 
 async def html_to_pdf(html: str) -> bytes:
@@ -554,7 +550,7 @@ async def generate(request: Request):
             return JSONResponse({"detail": "Job description is required."}, status_code=400)
 
         # 1. Generate tailored data
-        data = await call_gemini(jd)
+        data = await tailor_resume(jd)
 
         # 2. Render to HTML
         html = build_resume_html(data)

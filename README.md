@@ -2,54 +2,24 @@
 
 # Resume Tailor
 
-A local automation tool that tailors a master resume for specific job descriptions and exports an ATS-optimized, single-page PDF in seconds.
-
-## Overview
-
-Applying to roles in volume requires tailoring skills, summary, and bullet points to match target job descriptions without losing document formatting. Resume Tailor eliminates manual editing by connecting Google Gemini to a headless Chromium rendering pipeline, guaranteeing exact typography, verified hyperlinks, and a strict single-page constraint.
-
-## Architecture
-
-1. **Intelligent Tailoring**: Uses Google Gemini with structured JSON output and a resilient fallback cascade (`gemini-3.5-flash`, `gemini-3-flash-preview`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`) to prevent timeout and 503 errors.
-2. **Boilerplate Stripping**: Automatically cleans HR disclaimer copy, benefits, and legal statements from pasted job descriptions before prompt evaluation.
-3. **Deterministic PDF Export**: Renders the tailored JSON into semantic HTML/CSS and compiles a Letter-sized PDF using Playwright Chromium.
-4. **Auto-Save**: Every run generates a timestamped PDF in `tailored_resumes/` and updates `tailored_resumes/latest.pdf` while simultaneously triggering a browser download.
-
-## Requirements
-
-- Python 3.10+
-- Google Gemini API key (Google AI Studio)
+A local app that tailors a master resume to a job description and exports a Letter-sized PDF.
 
 ## Setup
 
-1. Clone the repository and navigate into the folder:
-   ```bash
-   git clone https://github.com/tejasdu/resume-generator.git
-   cd resume-generator
-   ```
+Use Python 3.10+ and a recent Codex CLI signed in to your ChatGPT account. On macOS the app uses the CLI bundled with ChatGPT when available. Otherwise it uses `codex` on PATH. Set `RESUME_CODEX_BIN` in `.env` to override the executable path.
 
-2. Create and activate a virtual environment:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+codex login status
+```
 
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   playwright install chromium
-   ```
-
-4. Create a `.env` file in the root directory:
-   ```bash
-   GOOGLE_API_KEY=your_gemini_api_key_here
-   ```
+If the CLI is signed out, run `codex login` and choose ChatGPT sign-in. If you use the bundled CLI and `codex` is unavailable on PATH, use `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex` for these commands.
 
 ## Usage
 
-Start the local server:
-```bash
-./start.sh
-```
+Run `./start.sh` or open `ResumeTailor.command`. Paste a job description and click **Generate & Save Resume**. The app downloads the PDF, saves a timestamped copy in `tailored_resumes/`, and updates `tailored_resumes/latest.pdf`.
 
-The web interface will open automatically at `http://localhost:8000`. Paste any job description and click **Generate & Save Resume**. The tailored PDF will be generated and saved to `tailored_resumes/` within 20 seconds.
+The model defaults to GPT‑6.1 Sol through your signed-in Codex session. You can set `RESUME_MODEL` in `.env` to another model available to that session. Generation uses your ChatGPT plan's Codex allowance. The model receives the job description and the master resume data in `app.py`. Playwright renders the structured response locally.
